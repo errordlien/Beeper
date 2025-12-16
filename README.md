@@ -51,14 +51,14 @@ docker run --rm \
 docker run -d \
   --name beeper-whatsapp \
   -v beeper-config:/root/.config \
-  -v beeper-data-whatsapp:/root/.local/share/bbctl \
+  -v beeper-data:/root/.local/share/bbctl \
   errordlien/beeper run sh-whatsapp
 
 # Run a Signal bridge
 docker run -d \
   --name beeper-signal \
   -v beeper-config:/root/.config \
-  -v beeper-data-signal:/root/.local/share/bbctl \
+  -v beeper-data:/root/.local/share/bbctl \
   errordlien/beeper run sh-signal
 
 ```
