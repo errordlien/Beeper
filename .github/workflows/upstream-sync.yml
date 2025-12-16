@@ -1,0 +1,116 @@
+name: Sync with Upstream Releases
+
+on:
+  schedule:
+    # Check for new releases every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest upstream release
+        id: upstream
+        run: |
+          LATEST_RELEASE=$(curl -s https://api.github.com/repos/beeper/bridge-manager/releases/latest)
+          RELEASE_TAG=$(echo "$LATEST_RELEASE" | jq -r .tag_name)
+          RELEASE_NAME=$(echo "$LATEST_RELEASE" | jq -r .name)
+          RELEASE_BODY=$(echo "$LATEST_RELEASE" | jq -r .body)
+          RELEASE_URL=$(echo "$LATEST_RELEASE" | jq -r .html_url)
+
+          echo "tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "name=$RELEASE_NAME" >> $GITHUB_OUTPUT
+          echo "url=$RELEASE_URL" >> $GITHUB_OUTPUT
+
+          # Save release body to file for multiline handling
+          echo "$RELEASE_BODY" > /tmp/release_body.txt
+
+      - name: Check if release already exists
+        id: check
+        run: |
+          if git rev-parse "${{ steps.upstream.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Release ${{ steps.upstream.outputs.tag }} already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "New release detected: ${{ steps.upstream.outputs.tag }}"
+          fi
+
+      - name: Configure Git
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create release commit
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          # Update Dockerfile comment or add a build arg for tracking
+          sed -i "s|# Synced with beeper/bridge-manager.*|# Synced with beeper/bridge-manager ${{ steps.upstream.outputs.tag }}|g" Dockerfile || true
+
+          # If the comment doesn't exist, add it after the git clone line
+          if ! grep -q "# Synced with beeper/bridge-manager" Dockerfile; then
+            sed -i "/RUN git clone/a # Synced with beeper/bridge-manager ${{ steps.upstream.outputs.tag }}" Dockerfile
+          fi
+
+          git add Dockerfile
+          git commit -m "Sync with upstream release ${{ steps.upstream.outputs.tag }}" || echo "No changes to commit"
+          git tag -a "${{ steps.upstream.outputs.tag }}" -m "Release ${{ steps.upstream.outputs.tag }}"
+
+      - name: Push changes
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git push origin main
+          git push origin "${{ steps.upstream.outputs.tag }}"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Read release body from file
+          RELEASE_BODY=$(cat /tmp/release_body.txt)
+
+          # Create release with upstream release notes
+          cat << EOF > /tmp/release_notes.md
+          # Beeper Bridge Manager ${{ steps.upstream.outputs.tag }}
+
+          This release syncs with the upstream [beeper/bridge-manager ${{ steps.upstream.outputs.tag }}](${{ steps.upstream.outputs.url }}).
+
+          ## Upstream Release Notes
+
+          $RELEASE_BODY
+
+          ## Docker Images
+
+          \`\`\`bash
+          # GitHub Container Registry
+          docker pull ghcr.io/${{ github.repository }}:${{ steps.upstream.outputs.tag }}
+          docker pull ghcr.io/${{ github.repository }}:latest
+          \`\`\`
+
+          ## Verification
+
+          The container is built from the upstream repository at tag \`${{ steps.upstream.outputs.tag }}\`.
+          EOF
+
+          gh release create "${{ steps.upstream.outputs.tag }}" \
+            --title "Release ${{ steps.upstream.outputs.tag }}" \
+            --notes-file /tmp/release_notes.md
+
+      - name: Trigger Docker build
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run docker-publish.yml --ref "${{ steps.upstream.outputs.tag }}"
