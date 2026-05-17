@@ -80,10 +80,11 @@ docker build -t beeper .
 
 ## Automated Updates
 
-This repository automatically syncs with upstream [beeper/bridge-manager](https://github.com/beeper/bridge-manager) releases:
+This repository automatically syncs with upstream [beeper/bridge-manager](https://github.com/beeper/bridge-manager) package updates:
 
-- **Automatic Sync**: Checks for new upstream releases every 6 hours
-- **Release Creation**: Automatically creates matching releases with upstream release notes
+- **Automatic Sync**: Checks for new upstream package digests every 6 hours
+- **Dev Release Channel**: Updates the `dev/latest` release/tag from upstream package updates
+- **Prod Release Channel**: `prod/main` image tag tracks builds from the main branch
 - **Docker Publishing**: Builds and publishes multi-platform Docker images (amd64/arm64)
 - **Registry**: Images are published to GitHub Container Registry
 
@@ -92,6 +93,8 @@ This repository automatically syncs with upstream [beeper/bridge-manager](https:
 ```bash
 # GitHub Container Registry
 docker pull ghcr.io/errordlien/beeper:latest
+docker pull ghcr.io/errordlien/beeper:prod/main
+docker pull ghcr.io/errordlien/beeper:dev/latest
 docker pull ghcr.io/errordlien/beeper:v1.0.0  # specific version
 ```
 

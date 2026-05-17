@@ -1,8 +1,8 @@
-name: Sync with Upstream Releases
+name: Sync with Upstream Packages
 
 on:
   schedule:
-    # Check for new releases every 6 hours
+    # Check for new upstream package updates every 6 hours
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
@@ -19,31 +19,45 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get latest upstream release
+      - name: Get latest upstream package digest
         id: upstream
         run: |
-          LATEST_RELEASE=$(curl -s https://api.github.com/repos/beeper/bridge-manager/releases/latest)
-          RELEASE_TAG=$(echo "$LATEST_RELEASE" | jq -r .tag_name)
-          RELEASE_NAME=$(echo "$LATEST_RELEASE" | jq -r .name)
-          RELEASE_BODY=$(echo "$LATEST_RELEASE" | jq -r .body)
-          RELEASE_URL=$(echo "$LATEST_RELEASE" | jq -r .html_url)
+          set -euo pipefail
 
-          echo "tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-          echo "name=$RELEASE_NAME" >> $GITHUB_OUTPUT
-          echo "url=$RELEASE_URL" >> $GITHUB_OUTPUT
+          TOKEN=$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 "https://ghcr.io/token?scope=repository:beeper/bridge-manager:pull" | jq -r .token)
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Failed to fetch GHCR pull token for beeper/bridge-manager" >&2
+            exit 1
+          fi
 
-          # Save release body to file for multiline handling
-          echo "$RELEASE_BODY" > /tmp/release_body.txt
+          HEADERS=$(curl -fsSI --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/beeper/bridge-manager/manifests/latest")
 
-      - name: Check if release already exists
+          DIGEST=$(echo "$HEADERS" \
+            | tr -d '\r' \
+            | awk -F': ' '{ if (tolower($1) == "docker-content-digest") print $2 }')
+
+          if [ -z "$DIGEST" ]; then
+            echo "Could not resolve upstream package digest from manifest headers for tag latest" >&2
+            echo "$HEADERS" | sed -n '1,20p'
+            exit 1
+          fi
+
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/beeper/bridge-manager@$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "url=https://github.com/beeper/bridge-manager/pkgs/container/bridge-manager" >> "$GITHUB_OUTPUT"
+
+      - name: Check if package digest already synced
         id: check
         run: |
-          if git rev-parse "${{ steps.upstream.outputs.tag }}" >/dev/null 2>&1; then
+          if grep -q "# Synced with beeper/bridge-manager package digest ${{ steps.upstream.outputs.digest }}" Dockerfile; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Release ${{ steps.upstream.outputs.tag }} already exists"
+            echo "Package digest ${{ steps.upstream.outputs.digest }} already synced"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "New release detected: ${{ steps.upstream.outputs.tag }}"
+            echo "New package digest detected: ${{ steps.upstream.outputs.digest }}"
           fi
 
       - name: Configure Git
@@ -52,65 +66,75 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create release commit
+      - name: Create package sync commit
         if: steps.check.outputs.exists == 'false'
         run: |
-          # Update Dockerfile comment or add a build arg for tracking
-          sed -i "s|# Synced with beeper/bridge-manager.*|# Synced with beeper/bridge-manager ${{ steps.upstream.outputs.tag }}|g" Dockerfile || true
+          # Update Dockerfile comment or add it for tracking
+          sed -i "s|# Synced with beeper/bridge-manager.*|# Synced with beeper/bridge-manager package digest ${{ steps.upstream.outputs.digest }}|g" Dockerfile || true
 
           # If the comment doesn't exist, add it after the git clone line
           if ! grep -q "# Synced with beeper/bridge-manager" Dockerfile; then
-            sed -i "/RUN git clone/a # Synced with beeper/bridge-manager ${{ steps.upstream.outputs.tag }}" Dockerfile
+            sed -i "/RUN git clone/a # Synced with beeper/bridge-manager package digest ${{ steps.upstream.outputs.digest }}" Dockerfile
           fi
 
+          DIGEST_SHORT_LENGTH=12
+          SHORT_DIGEST=$(echo "${{ steps.upstream.outputs.digest }}" | sed 's/^sha256://' | cut -c1-"$DIGEST_SHORT_LENGTH")
           git add Dockerfile
-          git commit -m "Sync with upstream release ${{ steps.upstream.outputs.tag }}" || echo "No changes to commit"
-          git tag -a "${{ steps.upstream.outputs.tag }}" -m "Release ${{ steps.upstream.outputs.tag }}"
+          if git diff --cached --quiet; then
+            echo "Expected Dockerfile changes were not staged; aborting." >&2
+            exit 1
+          fi
+          git commit -m "Sync with upstream package $SHORT_DIGEST"
+          # dev/latest is intentionally a moving tag that should always point to the newest upstream package sync.
+          git tag -fa "dev/latest" -m "Dev package sync ${{ steps.upstream.outputs.digest }}"
 
       - name: Push changes
         if: steps.check.outputs.exists == 'false'
         run: |
           git push origin main
-          git push origin "${{ steps.upstream.outputs.tag }}"
+          git push origin "dev/latest" --force
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release (dev/latest)
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Read release body from file
-          RELEASE_BODY=$(cat /tmp/release_body.txt)
-
-          # Create release with upstream release notes
           cat << EOF > /tmp/release_notes.md
-          # Beeper Bridge Manager ${{ steps.upstream.outputs.tag }}
+          # Beeper Bridge Manager Dev Channel
 
-          This release syncs with the upstream [beeper/bridge-manager ${{ steps.upstream.outputs.tag }}](${{ steps.upstream.outputs.url }}).
+          This dev release tracks the latest upstream package from [beeper/bridge-manager](${{ steps.upstream.outputs.url }}).
 
-          ## Upstream Release Notes
+          ## Upstream Package
 
-          $RELEASE_BODY
+          \`${{ steps.upstream.outputs.image }}\`
 
           ## Docker Images
 
           \`\`\`bash
           # GitHub Container Registry
-          docker pull ghcr.io/${{ github.repository }}:${{ steps.upstream.outputs.tag }}
+          docker pull ghcr.io/${{ github.repository }}:dev/latest
+          docker pull ghcr.io/${{ github.repository }}:prod/main
           docker pull ghcr.io/${{ github.repository }}:latest
           \`\`\`
 
           ## Verification
 
-          The container is built from the upstream repository at tag \`${{ steps.upstream.outputs.tag }}\`.
+          The container is synced to upstream package digest \`${{ steps.upstream.outputs.digest }}\`.
           EOF
 
-          gh release create "${{ steps.upstream.outputs.tag }}" \
-            --title "Release ${{ steps.upstream.outputs.tag }}" \
-            --notes-file /tmp/release_notes.md
+          if gh release view "dev/latest" >/dev/null 2>&1; then
+            gh release edit "dev/latest" \
+              --title "Dev Release (latest upstream package)" \
+              --notes-file /tmp/release_notes.md
+          else
+            gh release create "dev/latest" \
+              --title "Dev Release (latest upstream package)" \
+              --notes-file /tmp/release_notes.md
+          fi
 
       - name: Trigger Docker build
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh workflow run docker-publish.yml --ref "${{ steps.upstream.outputs.tag }}"
+          gh workflow run docker-publish.yml --ref "dev/latest"
