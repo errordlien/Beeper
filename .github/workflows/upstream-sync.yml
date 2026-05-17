@@ -22,16 +22,26 @@ jobs:
       - name: Get latest upstream package digest
         id: upstream
         run: |
+          set -euo pipefail
+
           TOKEN=$(curl -fsSL "https://ghcr.io/token?scope=repository:beeper/bridge-manager:pull" | jq -r .token)
-          DIGEST=$(curl -fsSI \
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Failed to fetch GHCR pull token for beeper/bridge-manager" >&2
+            exit 1
+          fi
+
+          HEADERS=$(curl -fsSI \
             -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
-            "https://ghcr.io/v2/beeper/bridge-manager/manifests/latest" \
+            "https://ghcr.io/v2/beeper/bridge-manager/manifests/latest")
+
+          DIGEST=$(echo "$HEADERS" \
             | tr -d '\r' \
             | awk -F': ' '{ if (tolower($1) == "docker-content-digest") print $2 }')
 
           if [ -z "$DIGEST" ]; then
-            echo "Could not resolve upstream package digest" >&2
+            echo "Could not resolve upstream package digest from manifest headers for tag latest" >&2
+            echo "$HEADERS" | sed -n '1,20p'
             exit 1
           fi
 
@@ -69,7 +79,11 @@ jobs:
 
           SHORT_DIGEST=$(echo "${{ steps.upstream.outputs.digest }}" | sed 's/^sha256://' | cut -c1-12)
           git add Dockerfile
-          git commit -m "Sync with upstream package $SHORT_DIGEST" || echo "No changes to commit"
+          if git diff --cached --quiet; then
+            echo "Expected Dockerfile changes were not staged; aborting." >&2
+            exit 1
+          fi
+          git commit -m "Sync with upstream package $SHORT_DIGEST"
           git tag -fa "dev/latest" -m "Dev package sync ${{ steps.upstream.outputs.digest }}"
 
       - name: Push changes
