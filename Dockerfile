@@ -5,7 +5,7 @@ WORKDIR /app
 
 # Clone the repository
 # We clone specifically to ensure we get the build scripts and versioning info correctly
-# Synced with beeper/bridge-manager package digest sha256:845d44be8a9cdaa88f0ff795fdbcc29aef8831bedbb00f60ba0e108d8479c1be
+# Synced with beeper/bridge-manager package digest sha256:a116e95147d92a716925b1829df60b1195e4826dffeac4f32f786ac63d9186a1
 RUN git clone https://github.com/beeper/bridge-manager.git .
 
 # Build the bbctl binary
